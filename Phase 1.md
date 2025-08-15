@@ -1,6 +1,6 @@
 ## Phase 1 — Semantic Search over GitHub Stars (Step‑by‑Step Plan)
 
-- [ ] Establish single source of truth for the plan (this file) and keep it updated as tasks complete.
+- [x] Establish single source of truth for the plan (this file) and keep it updated as tasks complete.
 
 ### 1) Scope, Constraints, and Success Criteria
 - [ ] Confirm goals: natural‑language search over starred repos based on README semantics.
@@ -12,46 +12,46 @@
 
 ### 2) Repository and Environments
 - [ ] Decide Pages deployment mode (e.g., `gh-pages` branch or `docs/` folder in `main`).
-- [ ] Set up basic project structure:
-  - [ ] `scripts/` for Python CI pipeline (collect → preprocess → embed → aggregate → quantize → build DB → publish).
-  - [ ] `starmap/` (or `public/`) for published DuckDB file and a tiny `version.json`.
-  - [ ] `ui/` for Vue + Tailwind static site (Vite recommended).
-- [ ] Configure `.gitignore` and large file strategy (DuckDB committed on Pages branch only).
+- [x] Set up basic project structure:
+  - [x] `scripts/` for Python CI pipeline (collect → preprocess → embed → aggregate → quantize → build DB → publish).
+  - [x] `starmap/` (or `public/`) for published DuckDB file and a tiny `version.json`.
+  - [x] `ui/` for Vue + Tailwind static site (Vite recommended).
+- [x] Configure `.gitignore` and large file strategy (DuckDB committed on Pages branch only).
 
 ### 3) Data Contract (DuckDB) — Minimal Schema for Phase 1
-- [ ] Define schema (DDL kept in `scripts/sql/schema.sql`):
-  - [ ] `repos(repo_id, full_name, html_url, description, language, stars, starred_at, last_updated)`
-  - [ ] `readmes(repo_id, cleaned_text, size_tokens, hash)`
-  - [ ] `chunks(repo_id, chunk_id, text, size_tokens)` (optional but recommended for aggregation quality)
-  - [ ] `repo_vectors(repo_id, embedding FLOAT[384])`
-  - [ ] `repo_vectors_q8(repo_id, embedding INT8[384], scale FLOAT)` (optional; for small download)
-  - [ ] `neighbors(repo_id, neighbor_id, sim)` (optional; for related repos)
-- [ ] Create SQL to build tables and indexes (on `repo_id`, `language`, `stars`).
+- [x] Define schema (DDL kept in `scripts/sql/schema.sql`):
+  - [x] `repos(repo_id, full_name, html_url, description, language, stars, starred_at, last_updated)`
+  - [x] `readmes(repo_id, cleaned_text, hash)`
+  - [x] `chunks(repo_id, chunk_id, text)` (optional but recommended for aggregation quality)
+  - [x] `chunk_vectors(repo_id, chunk_id, embedding FLOAT[])`
+  - [x] `repo_vectors(repo_id, embedding FLOAT[384])`
+  - [x] `repo_vectors_q8(repo_id, embedding INT8[384], scale FLOAT)` (optional; for small download)
+  - [x] `neighbors(repo_id, neighbor_id, sim)` (optional; for related repos)
+- [x] Create SQL to build tables and indexes (on `repo_id`, `language`, `stars`).
 
 ### 4) GitHub Integration (CI)
 - [ ] Create GitHub Actions secret `GH_TOKEN` (read‑only).
-- [ ] Python script to list starred repos (paged API) with ETag/If‑None‑Match caching.
-- [ ] Python script to fetch primary README for each repo (`/readme` API), with SHA/ETag cache and rate‑limit handling.
-- [ ] Persist raw metadata and README bodies to a temporary artifact (or cache directory) during CI.
+- [x] Python script to list starred repos (paged API); includes `starred_at` via `application/vnd.github.star+json`.
+- [x] Python script to fetch primary README for each repo (`/readme` API), with basic concurrency.
+- [x] Persist raw metadata and README bodies to a `.cache/` directory.
 
 ### 5) Preprocessing and Chunking
-- [ ] Clean README: remove badges, shields, tables of badges, images‑only sections, normalize whitespace, strip HTML.
-- [ ] Language‑agnostic tokenization; count tokens per chunk.
-- [ ] Chunking: 400–800 token windows with slight overlap (e.g., 50 tokens) when README is large.
-- [ ] Persist `chunks` and (optionally) top snippet(s) for display.
+- [x] Clean README using `markdown-it-py` + `BeautifulSoup`/`lxml`: remove badges/shields (incl. tables), images-only sections, normalize whitespace; extract visible text.
+- [x] Chunking: default 512 token/units windows with 50 overlap using pluggable chunkers (`hf:<model>` default, `tiktoken`, `words`, `chars`).
+- [x] Add one metadata chunk per repo (title/language/description) to boost recall.
+- [x] Persist `chunks` and (optionally) top snippet(s) for display.
 
 ### 6) Embeddings (Batch in CI)
-- [ ] Pick model (open‑source, CPU‑friendly): `BAAI/bge-small-en-v1.5` (384‑d) or `all-MiniLM-L6-v2`.
-- [ ] Implement batch embedding with `sentence-transformers` (CPU) and on‑disk cache keyed by content hash.
-- [ ] Aggregate to one vector per repo:
-  - [ ] Compute mean vector of chunks; then select the medoid chunk (closest to mean) as canonical.
-  - [ ] Store in `repo_vectors` (float32).
-- [ ] Optional: int8 quantization of repo vectors; store in `repo_vectors_q8` with per‑vector scale.
+- [x] Pick model (open‑source, CPU‑friendly): `BAAI/bge-small-en-v1.5` (384‑d) (default).
+- [x] Implement batch embedding with `sentence-transformers` (CPU) and on‑disk cache keyed by content hash.
+- [x] Write chunk embeddings to JSONL.
+- [x] Aggregate to repo vectors (medoid after mean) and write `repo_vectors.jsonl` (float32) and `repo_vectors_q8.jsonl` (int8 + scale).
 
 ### 7) Build DuckDB
-- [ ] Materialize `repos`, `readmes`, `chunks` (optional), `repo_vectors`, and optionally `repo_vectors_q8` into `starmap.duckdb`.
-- [ ] Add simple indices for filters (language, stars, date starred).
-- [ ] Sanity check: sample queries from DuckDB CLI to verify counts and shapes.
+- [x] Materialize `repos`, `stars`, `readmes`, `chunks`, `chunk_vectors` into `starscope.duckdb` (scripted `scripts/db.py`).
+- [x] Add secondary indexes for filters (language, stars, date starred) and joins.
+- [x] Build DuckDB VSS HNSW index on fixed-size `FLOAT[dim]` `chunk_vectors_arr.embedding` (cosine) for fast search ([DuckDB VSS](https://duckdb.org/2024/05/03/vector-similarity-search-vss.html)).
+- [x] Sanity check: basic counts and search runs.
 
 ### 8) Publish Artifacts (CI)
 - [ ] Prepare `version.json` with timestamp, counts, model name, dims, and quantization flag.
@@ -74,6 +74,10 @@
 - [ ] Results list: name, description, language, stars, top README snippet, "Open on GitHub".
 - [ ] Filters: language (multi‑select), stars ≥ N, date starred window.
 
+### 9.5) CLI & Local Search Utilities (added)
+- [x] `scripts/search.py`: Chunk-level search with FAISS option, per-repo dedupe, and numpy caches.
+- [x] `scripts/search_db.py`: In-DB search via DuckDB VSS HNSW (`array_cosine_distance`) using `chunk_vectors_arr`.
+
 ### 10) Performance and UX Hardening
 - [ ] Measure first‑load size and search latency on desktop and a modest laptop.
 - [ ] Ensure Web Worker keeps UI responsive; show quick skeletons/spinners.
@@ -83,7 +87,7 @@
 ### 11) Documentation
 - [ ] Update `starscope/Readme.md` with architecture summary, model choices, and how to rebuild locally.
 - [ ] Add `starscope/Search.md` references and note defaults (384‑d, medoid aggregation, nightly cadence).
-- [ ] CLI examples: how to open `starmap.duckdb` and run sample SQL queries.
+- [x] CLI examples available via `scripts/search.py` and `scripts/search_db.py`.
 
 ### 12) Acceptance Tests (Definition of Done)
 - [ ] CI run completes on a clean fork with no manual steps.

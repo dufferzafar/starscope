@@ -1,0 +1,64 @@
+# === OS / Editor ===
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+.idea/
+.vscode/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+.python-version
+.venv/
+venv/
+ENV/
+env/
+.eggs/
+*.egg-info/
+dist/
+build/
+.coverage
+.coverage.*
+.pytest_cache/
+.mypy_cache/
+.hypothesis/
+.ruff_cache/
+
+# === Notebooks / reports ===
+.ipynb_checkpoints/
+
+# === Node / Vue / Vite ===
+ui/node_modules/
+ui/dist/
+ui/.vite/
+ui/.nuxt/
+ui/.cache/
+ui/.angular/
+*.tsbuildinfo
+
+# Logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Env files (keep examples committed)
+.env
+.env.*
+!.env.example
+
+# Local settings (keep example committed)
+settings.local.json
+scripts/settings.local.json
+scripts/settings.py
+
+# === DuckDB artifacts (kept only on Pages branch) ===
+*.duckdb
+starscope/*
+!starscope/.gitkeep
+
+# === Misc caches ===
+.cache/
+.tmp/ 

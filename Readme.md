@@ -7,23 +7,25 @@ Experiments with large language models and my starred github repositories.
 * Allow searching for stars not just via metadata (rust) 
     - But also by their semantic content in plain english
 
+* All fetching, cleaning, chunking, processing should happen in Python
+
 * Options for vector embeddings
     - First try something like `BAAI/bge-small-en-v1.5`
         - List other freely available alternatives
     - OpenAI's API
         - Need to estimate cost
 
-* The frontend should be in vue.js & use tailwind css
-    - It should be minimal and only use 3rd party libs when absolutely necessary
-
-* Could use d3.js or something else based on webgl to display clusters of repositories
-    - How will the clustering happen? via embeddings?
-
 * Single .duckdb file for storage
     - metdata, text chunks, embeddings etc.
     - can be loaded from the web (via wasm) or from cli
 
+* The frontend should be in vue.js & use tailwind css
+    - It should be minimal and only use 3rd party libs when absolutely necessary
+
 ## Phase 2 - Clustering visulisation
+
+* Could use d3.js or something else based on webgl to display clusters of repositories
+    - How will the clustering happen? via embeddings?
 
 ## Prior Art
 
