@@ -4,16 +4,15 @@ list:
 sync:
     uv --native-tls sync --active
 
-collect:
-    uv run --active scripts/collect.py stars
+collect what:
+    uv run --active scripts/collect.py {{what}}
 
 preprocess:
     uv run --active scripts/preprocess.py
 
 embed:
-    uv run --active scripts/embed.py
+    uv run --active scripts/embed.py --rep-method medoid --reps-only
 
-# --use-faiss
 search term:
     uv run --active scripts/search.py '{{term}}'
 
@@ -21,4 +20,5 @@ search_db term:
     uv run --active scripts/search_db.py '{{term}}'
 
 db:
+    rm -f scripts/.cache/starscope.duckdb
     uv run --active scripts/build_db.py

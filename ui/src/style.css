@@ -3,14 +3,3 @@
 :root {
   color-scheme: light dark;
 }
-
-body {
-  margin: 0;
-  min-width: 320px;
-  min-height: 100vh;
-}
-
-#app {
-  max-width: 1280px;
-  margin: 0 auto;
-}

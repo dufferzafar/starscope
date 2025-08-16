@@ -9,6 +9,7 @@ export type Repo = {
   description?: string | null
   language?: string | null
   stars?: number | null
+  starred_at?: string | null
 }
 
 export function useSearch() {
@@ -18,31 +19,23 @@ export function useSearch() {
   const error = ref<string | null>(null)
 
   async function ensureSchema(): Promise<{ dim: number }> {
-    const arrTable = await sqlQuery("SELECT table_name FROM information_schema.tables WHERE table_name = 'chunk_vectors_arr'")
+    // Prefer fixed-size array table from VSS build
+    const arrTable = await sqlQuery("SELECT table_name FROM information_schema.tables WHERE table_name = 'repo_reps_arr'")
     if (arrTable.length > 0) {
-      const sample = await sqlQuery('SELECT embedding FROM chunk_vectors_arr LIMIT 1')
+      const sample = await sqlQuery('SELECT embedding FROM repo_reps_arr LIMIT 1')
       if (sample.length > 0) {
         const arr = sample[0].embedding as Float32Array | number[]
         const dim = Array.isArray(arr) ? arr.length : (arr as any).length
         return { dim }
       }
     }
-    const s = await sqlQuery('SELECT embedding FROM chunk_vectors LIMIT 1')
+    // Fallback to base table with LIST(FLOAT)
+    const s = await sqlQuery('SELECT embedding FROM repo_reps LIMIT 1')
     if (s.length > 0) {
       const arr = s[0].embedding as number[]
       return { dim: Array.isArray(arr) ? arr.length : 384 }
     }
     return { dim: 384 }
-  }
-
-  function cosine(a: Float32Array, b: Float32Array): number {
-    let dot = 0, na = 0, nb = 0
-    for (let i = 0; i < a.length; i++) {
-      const x = a[i]; const y = b[i]
-      dot += x * y; na += x * x; nb += y * y
-    }
-    const denom = Math.sqrt(na) * Math.sqrt(nb) || 1
-    return dot / denom
   }
 
   async function embedQuery(text: string, dim: number): Promise<Float32Array> {
@@ -60,19 +53,20 @@ export function useSearch() {
       const { dim } = await ensureSchema()
       const qvec = await embedQuery(text, dim)
 
-      const hasArr = await sqlQuery("SELECT table_name FROM information_schema.tables WHERE table_name = 'chunk_vectors_arr'")
+      // Prefer VSS array table if present
+      const hasArr = await sqlQuery("SELECT table_name FROM information_schema.tables WHERE table_name = 'repo_reps_arr'")
+      const arrLiteral = `[${Array.from(qvec).map((x) => x.toFixed(6)).join(', ')}]::FLOAT[${dim}]`
       if (hasArr.length > 0) {
-        const arrLiteral = `[${Array.from(qvec).map((x) => x.toFixed(6)).join(', ')}]::FLOAT[${dim}]`
         const rows = await sqlQuery(
           `WITH q AS (SELECT ${arrLiteral} AS q)
            SELECT c.repo_id, MIN(array_cosine_distance(c.embedding, q.q)) AS dist
-           FROM chunk_vectors_arr c, q
+           FROM repo_reps_arr c, q
            GROUP BY c.repo_id
            ORDER BY dist ASC
            LIMIT ${limit}`
         )
         const ids = rows.map((r: any) => r.repo_id).join(',') || 'NULL'
-        const meta = await sqlQuery(`SELECT r.repo_id, r.full_name, r.description, r.language, r.stars, 'https://github.com/' || r.full_name AS html_url FROM repos r WHERE r.repo_id IN (${ids})`)
+        const meta = await sqlQuery(`SELECT s.repo_id, s.full_name, s.description, s.language, s.stargazers_count AS stars, s.starred_at, 'https://github.com/' || s.full_name AS html_url FROM stars s WHERE s.repo_id IN (${ids})`)
         const scored = rows.map((r: any) => {
           const m = meta.find((x: any) => x.repo_id === r.repo_id)
           return { ...m, score: 1 - (r.dist ?? 1) }
@@ -81,20 +75,23 @@ export function useSearch() {
         return scored
       }
 
-      let repoVecs = await sqlQuery(`SELECT cv.repo_id, cv.embedding FROM chunk_vectors cv GROUP BY cv.repo_id HAVING MIN(cv.chunk_id)`)
-      const items: Array<{ repo_id: number; score: number }> = []
-      for (const row of repoVecs) {
-        const emb = row.embedding as number[]
-        if (!emb || emb.length !== dim) continue
-        const v = Float32Array.from(emb)
-        const s = cosine(qvec, v)
-        items.push({ repo_id: row.repo_id, score: s })
-      }
-      items.sort((a, b) => b.score - a.score)
-      const top = items.slice(0, limit)
-      const ids = top.map((r) => r.repo_id).join(',') || 'NULL'
-      const meta = await sqlQuery(`SELECT r.repo_id, r.full_name, r.description, r.language, r.stars, 'https://github.com/' || r.full_name AS html_url FROM repos r WHERE r.repo_id IN (${ids})`)
-      return top.map((t) => ({ ...meta.find((m: any) => m.repo_id === t.repo_id), score: t.score }))
+      // No VSS array table; run full-scan cosine in DuckDB with cast to FLOAT[dim]
+      const rows = await sqlQuery(
+        `WITH q AS (SELECT ${arrLiteral} AS q)
+         SELECT c.repo_id, MIN(array_cosine_distance(CAST(c.embedding AS FLOAT[${dim}]), q.q)) AS dist
+         FROM repo_reps c, q
+         GROUP BY c.repo_id
+         ORDER BY dist ASC
+         LIMIT ${limit}`
+      )
+      const ids = rows.map((r: any) => r.repo_id).join(',') || 'NULL'
+      const meta = await sqlQuery(`SELECT s.repo_id, s.full_name, s.description, s.language, s.stargazers_count AS stars, s.starred_at, 'https://github.com/' || s.full_name AS html_url FROM stars s WHERE s.repo_id IN (${ids})`)
+      const scored = rows.map((r: any) => {
+        const m = meta.find((x: any) => x.repo_id === r.repo_id)
+        return { ...m, score: 1 - (r.dist ?? 1) }
+      })
+      scored.sort((a: any, b: any) => (b.score ?? 0) - (a.score ?? 0))
+      return scored
     } catch (e: any) {
       error.value = e?.message ?? String(e)
       return []
