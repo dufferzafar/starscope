@@ -23,20 +23,8 @@ def ensure_parent(path: Path) -> None:
 
 
 def create_tables(conn: duckdb.DuckDBPyConnection) -> None:
-    # Minimal schemas (no raw text tables)
-    conn.execute(
-        """
-		CREATE TABLE IF NOT EXISTS repos (
-		  repo_id BIGINT PRIMARY KEY,
-		  full_name TEXT NOT NULL,
-		  description TEXT,
-		  language TEXT,
-		  stars INTEGER,
-		  updated_at TIMESTAMP,
-		  pushed_at TIMESTAMP
-		);
-		"""
-    )
+    # Minimal schemas
+    # Removed repos table; stars holds repo metadata
     conn.execute(
         """
 		CREATE TABLE IF NOT EXISTS stars (
@@ -78,48 +66,7 @@ def load_jsonl_iter(path: Path) -> Iterable[Dict]:
                 continue
 
 
-def insert_repos(conn: duckdb.DuckDBPyConnection, path: Path) -> int:
-    if not path.exists():
-        print(f"[repos] File not found: {path}")
-        return 0
-    try:
-        print("[repos] Fast load via DuckDB JSON reader…")
-        count = conn.execute(
-            """
-			SELECT COUNT(*)
-			FROM read_json_auto(?)
-			WHERE try_cast(id AS BIGINT) IS NOT NULL
-			  AND full_name IS NOT NULL
-			""",
-            [str(path)],
-        ).fetchone()[0]
-        if count == 0:
-            print("[repos] No rows to insert")
-            return 0
-        conn.execute(
-            """
-			INSERT OR REPLACE INTO repos (
-				repo_id, full_name, description, language, stars, updated_at, pushed_at
-			)
-			SELECT
-				CAST(id AS BIGINT) AS repo_id,
-				CAST(full_name AS TEXT) AS full_name,
-				CAST(description AS TEXT) AS description,
-				CAST(language AS TEXT) AS language,
-				try_cast(stargazers_count AS INTEGER) AS stars,
-				try_cast(updated_at AS TIMESTAMP) AS updated_at,
-				try_cast(pushed_at AS TIMESTAMP) AS pushed_at
-			FROM read_json_auto(?)
-			WHERE try_cast(id AS BIGINT) IS NOT NULL
-			  AND full_name IS NOT NULL
-			""",
-            [str(path)],
-        )
-        print(f"[repos] Inserted {int(count)} rows via fast path")
-        return int(count)
-    except Exception as e:
-        print(f"[repos] Fast load failed ({e}); no fallback implemented")
-        return 0
+# Removed insert_repos; stars contains repo metadata
 
 
 def insert_stars(conn: duckdb.DuckDBPyConnection, path: Path) -> int:
@@ -209,8 +156,7 @@ def insert_repo_reps(conn: duckdb.DuckDBPyConnection, path: Path) -> int:
 
 def create_secondary_indexes(conn: duckdb.DuckDBPyConnection) -> None:
     print("Creating secondary indexes (btree)…")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_repos_language ON repos(language)")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_repos_stars ON repos(stars)")
+    # repos table removed
     conn.execute("CREATE INDEX IF NOT EXISTS idx_stars_starred_at ON stars(starred_at)")
     conn.execute("CREATE INDEX IF NOT EXISTS idx_repo_reps_repo ON repo_reps(repo_id)")
     print("Secondary indexes created")
@@ -266,31 +212,25 @@ def run(db_path: Path, cache_dir: Path, truncate: bool) -> None:
             print("Truncating existing tables…")
             conn.execute("DELETE FROM repo_reps")
             conn.execute("DELETE FROM stars")
-            conn.execute("DELETE FROM repos")
             conn.execute("DROP INDEX IF EXISTS idx_repo_reps_hnsw")
             conn.execute("DROP TABLE IF EXISTS repo_reps_arr")
 
         # Resolve files
         starred = cache_dir / STARRED_JSON.name
-        repos = cache_dir / REPOS_JSONL.name
         repo_reps = cache_dir / REPO_REPS_JSONL.name
 
-        print("Loading repos…")
-        n_repos = insert_repos(conn, repos)
         print("Loading stars…")
         n_stars = insert_stars(conn, starred)
         print("Loading repo_reps…")
         n_reps = insert_repo_reps(conn, repo_reps)
 
-        create_secondary_indexes(conn)
-        create_vss_index(conn, cache_dir)
+        # create_secondary_indexes(conn)
+        # create_vss_index(conn, cache_dir)
 
         conn.commit()
         print("Commit complete.")
 
-        print(
-            f"Loaded into {db_path}: repos={n_repos}, stars={n_stars}, repo_reps={n_reps}"
-        )
+        print(f"Loaded into {db_path}: stars={n_stars}, repo_reps={n_reps}")
     finally:
         conn.close()
         print("Closed DB connection.")

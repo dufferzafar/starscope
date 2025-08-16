@@ -148,11 +148,12 @@ def format_and_print(rows: List[Tuple[int, int, float]], conn: duckdb.DuckDBPyCo
         return
     repo_ids = [r for (r, _, _) in rows]
     placeholders = ",".join(["?"] * len(repo_ids))
+    # stars holds repo metadata now
     meta = conn.execute(
-        f"SELECT repo_id, full_name, description, language, stars FROM repos WHERE repo_id IN ({placeholders})",
+        f"SELECT repo_id, full_name, description, language, stargazers_count FROM stars WHERE repo_id IN ({placeholders})",
         repo_ids,
     ).fetchall()
-    meta_idx = {int(rid): (full_name, description, language, stars) for (rid, full_name, description, language, stars) in meta}
+    meta_idx = {int(rid): (full_name, description, language, stargazers_count) for (rid, full_name, description, language, stargazers_count) in meta}
 
     for rid, _rep_id, dist in rows:
         full_name, description, language, stars = meta_idx.get(int(rid), (f"repo:{rid}", "", None, None))
@@ -173,7 +174,7 @@ def run(args: Args) -> None:
     model_name = args.model_name or str(meta.get("model", "BAAI/bge-small-en-v1.5"))
     model = ensure_model(model_name, device)
 
-    # Connect DB and ensure VSS is available
+    # Connect DB and ensure VSS functions are available (even without index)
     conn = duckdb.connect(str(args.db_path))
     try:
         conn.execute("INSTALL vss; LOAD vss;")
@@ -191,21 +192,20 @@ def run(args: Args) -> None:
         print(f"Query vector dim {q.shape[0]} != DB dim {dim}", file=sys.stderr)
         return
 
-    # Determine available rows from repo reps
+    # Determine available rows and source
     try:
         total_n = int(conn.execute("SELECT COUNT(*) FROM repo_reps_arr").fetchone()[0])
         source_table = "repo_reps_arr"
-        select_cols = "repo_id, rep_id, embedding"
         embed_expr = "embedding"  # already FLOAT[dim]
     except Exception:
         total_n = int(conn.execute("SELECT COUNT(*) FROM repo_reps").fetchone()[0])
         source_table = "repo_reps"
-        select_cols = "repo_id, rep_id, embedding"
-        embed_expr = "embedding"  # LIST(FLOAT), distance works but slower
+        # Cast LIST(FLOAT) to typed array so array_cosine_distance binds
+        embed_expr = f"CAST(embedding AS FLOAT[{dim}])"
 
     pre_k = min(args.top_k * (args.oversample if args.unique else 1), int(total_n))
 
-    # Build SQL using cosine distance; optimizer will use HNSW if present
+    # Build SQL using cosine distance; full scan is fine without index at this scale
     q_lit = build_array_literal(q.astype(np.float32, copy=False), dim)
     sql = f"""
     SELECT repo_id, rep_id, array_cosine_distance({embed_expr}, {q_lit}) AS dist
