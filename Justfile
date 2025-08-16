@@ -28,3 +28,6 @@ build-ui:
 
 gh-pages: build-ui
     cd ../starscope-pages && git pull && cp -r ../starscope/ui/dist/* . && git add . && git commit -m "Deploy UI $(date -u +"%Y-%m-%dT%H:%M:%SZ")" && git push
+
+ci:
+    uv run --active scripts/run_ci.py

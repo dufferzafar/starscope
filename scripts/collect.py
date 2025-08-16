@@ -43,9 +43,34 @@ def auth_headers(token: str) -> Dict[str, str]:
     }
 
 
+def _parse_ts_iso8601_z(ts: Optional[str]) -> Optional[int]:
+    if not ts or not isinstance(ts, str):
+        return None
+    # Expected like 2025-08-14T23:30:06Z
+    try:
+        from datetime import datetime, timezone
+        dt = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+        return int(dt.timestamp())
+    except Exception:
+        return None
+
+
 async def fetch_starred(client: httpx.AsyncClient, cfg: GitHubConfig) -> List[Dict[str, Any]]:
+    # Determine cutoff from existing starred.json (most recent starred_at we've already saved)
+    cutoff_ts: Optional[int] = None
+    if STARRED_JSON.exists():
+        try:
+            existing = json.loads(STARRED_JSON.read_text(encoding="utf-8"))
+            for rec in existing:
+                ts = _parse_ts_iso8601_z(rec.get("starred_at"))
+                if ts is not None:
+                    cutoff_ts = max(cutoff_ts or ts, ts)
+        except Exception:
+            cutoff_ts = None
+
     starred: List[Dict[str, Any]] = []
     page = 1
+    reached_cutoff = False
     with tqdm(desc="Fetching starred repos", unit="page") as pbar:
         while True:
             url = f"{API_ROOT}/user/starred"
@@ -65,6 +90,11 @@ async def fetch_starred(client: httpx.AsyncClient, cfg: GitHubConfig) -> List[Di
                 else:
                     repo = item
                     starred_at = None
+                ts = _parse_ts_iso8601_z(starred_at)
+                # Stop if we've reached already-known stars
+                if cutoff_ts is not None and ts is not None and ts <= cutoff_ts:
+                    reached_cutoff = True
+                    break
                 starred.append(
                     {
                         "id": repo.get("id"),
@@ -78,6 +108,8 @@ async def fetch_starred(client: httpx.AsyncClient, cfg: GitHubConfig) -> List[Di
                         "starred_at": starred_at,
                     }
                 )
+            if reached_cutoff:
+                break
             page += 1
             pbar.update(1)
     return starred
@@ -327,9 +359,31 @@ async def main_async(mode: str) -> None:
     limits = httpx.Limits(max_keepalive_connections=50, max_connections=100)
     async with httpx.AsyncClient(headers=auth_headers(cfg.token), timeout=timeout, limits=limits) as client:
         if mode == "stars":
-            starred = await fetch_starred(client, cfg)
-            save_starred(STARRED_JSON, starred)
-            print(f"Saved starred repos to {STARRED_JSON} ({len(starred)} repos)")
+            # Load existing to support incremental fetch
+            existing: List[Dict[str, Any]] = []
+            if STARRED_JSON.exists():
+                try:
+                    existing = json.loads(STARRED_JSON.read_text(encoding="utf-8"))
+                except Exception:
+                    existing = []
+
+            new_items = await fetch_starred(client, cfg)
+
+            if not existing:
+                merged = new_items
+            else:
+                # Merge new (most recent first) + existing, dedupe by repo id
+                seen: set = set()
+                merged: List[Dict[str, Any]] = []
+                for rec in new_items + existing:
+                    rid = rec.get("id")
+                    if rid is None or rid in seen:
+                        continue
+                    seen.add(rid)
+                    merged.append(rec)
+
+            save_starred(STARRED_JSON, merged)
+            print(f"Saved starred repos to {STARRED_JSON} (added {len(new_items)} new, total {len(merged)})")
             return
 
         if mode == "readmes":

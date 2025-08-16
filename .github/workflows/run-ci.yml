@@ -1,0 +1,73 @@
+name: Run Starscope CI
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    - cron: '0 3 * * *'  # daily at 03:00 UTC
+
+permissions:
+  contents: write
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      HF_HUB_DISABLE_TELEMETRY: '1'
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      - name: Cache Hugging Face models
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cache/huggingface
+            ~/.cache/torch
+          key: hf-${{ runner.os }}-${{ hashFiles('**/scripts/run_ci.py') }}
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install duckdb httpx tqdm sentence-transformers numpy beautifulsoup4 markdown-it-py lxml tiktoken
+
+      - name: Run CI pipeline
+        run: |
+          python starscope/scripts/run_ci.py \
+            --db starscope/scripts/.cache/starscope.duckdb \
+            --cache-dir starscope/scripts/.cache \
+            --model BAAI/bge-small-en-v1.5 \
+            --batch-size 64 \
+            --rep-method medoid \
+            --reps-per-repo 1
+
+      - name: Prepare gh-pages branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git fetch origin || true
+          if git show-ref --quiet refs/remotes/origin/gh-pages; then
+            git checkout -B gh-pages origin/gh-pages
+          else
+            git checkout --orphan gh-pages
+            rm -rf ./* .[^.]* || true
+          fi
+
+      - name: Copy DuckDB to data/
+        run: |
+          mkdir -p data
+          cp starscope/scripts/.cache/starscope.duckdb data/starscope.duckdb
+
+      - name: Commit and push changes
+        run: |
+          git add data/starscope.duckdb
+          git commit -m "Update DB $(date -u +"%Y-%m-%dT%H:%M:%SZ")" || echo "No changes to commit"
+          git push origin gh-pages
