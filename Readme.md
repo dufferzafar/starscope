@@ -1,31 +1,28 @@
-# GitHub Star Scope
+# StarScope
 
-Experiments with large language models and my starred github repositories.
+Semantic search over my starred github repositories.
 
 ## Phase 1 - Semantic Search
 
-* Allow searching for stars not just via metadata (rust) 
+* Allows searching for stars not just via metadata
     - But also by their semantic content in plain english
 
-* All fetching, cleaning, chunking, processing should happen in Python
-
-* Options for vector embeddings
-    - First try something like `BAAI/bge-small-en-v1.5`
-        - List other freely available alternatives
-    - OpenAI's API
-        - Need to estimate cost
+* Vector embeddings
+    - `BAAI/bge-small-en-v1.5`
+        - Could try other freely available models
 
 * Single .duckdb file for storage
-    - metdata, text chunks, embeddings etc.
+    - `stars` table for repo metadata
+    - `repo_reps` table for repo representative embeddings
     - can be loaded from the web (via wasm) or from cli
 
-* The frontend should be in vue.js & use tailwind css
-    - It should be minimal and only use 3rd party libs when absolutely necessary
+* Fetching, cleaning, chunking, processing done in Python
+
+* vue.js + tailwind frontend
 
 ## Phase 2 - Clustering visulisation
 
-* Could use d3.js or something else based on webgl to display clusters of repositories
-    - How will the clustering happen? via embeddings?
+* Use d3.js or webgl lib to display clusters of repositories
 
 ## Prior Art
 
