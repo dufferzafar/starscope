@@ -13,14 +13,10 @@ from sentence_transformers import SentenceTransformer, util
 
 
 CACHE_DIR = Path(__file__).resolve().parent / ".cache"
-EMB_JSONL = CACHE_DIR / "chunk_embeddings.jsonl"
+# EMB_JSONL = CACHE_DIR / "chunk_embeddings.jsonl"
+EMB_JSONL = CACHE_DIR / "repo_vectors.jsonl"
 META_JSON = CACHE_DIR / "embeddings_meta.json"
 STARRED_JSON = CACHE_DIR / "starred.json"
-
-# Fast-load caches (chunk-level)
-EMB_NPY = CACHE_DIR / "corpus_embeddings.npy"
-IDMAP_NPY = CACHE_DIR / "id_map.npy"
-FAISS_INDEX = CACHE_DIR / "corpus_flatip.faiss"
 
 
 @dataclass
@@ -34,9 +30,6 @@ class Args:
     model_name: Optional[str]
     normalize: bool
     snippet_chars: int
-    use_faiss: bool
-    build_faiss: bool
-    faiss_index: Path
     unique: bool
     oversample: int
 
@@ -137,59 +130,19 @@ def load_corpus_from_jsonl(path: Path) -> Tuple[np.ndarray, List[Tuple[int, int]
                 continue
             rec = json.loads(line)
             rid = rec.get("repo_id")
-            cid = rec.get("chunk_id")
+            # Accept either chunk_id or rep_id; prefer chunk_id if present
+            local_id = rec.get("chunk_id")
+            if local_id is None:
+                local_id = rec.get("rep_id", -1)
             emb = rec.get("embedding")
-            if rid is None or cid is None or not isinstance(emb, list):
+            if rid is None or local_id is None or not isinstance(emb, list):
                 continue
             vectors.append(emb)
-            mapping.append((int(rid), int(cid)))
+            mapping.append((int(rid), int(local_id)))
     if not vectors:
         raise RuntimeError(f"No embeddings found in {path}")
     mat = np.asarray(vectors, dtype=np.float32)
     return mat, mapping
-
-
-def ensure_npy_cache(
-    emb_jsonl: Path, emb_npy: Path, idmap_npy: Path
-) -> Tuple[np.ndarray, np.ndarray]:
-    if emb_npy.exists() and idmap_npy.exists():
-        embs = np.load(emb_npy, mmap_mode="r")
-        idmap = np.load(idmap_npy)
-        return embs, idmap
-    embs, mapping = load_corpus_from_jsonl(emb_jsonl)
-    np.save(emb_npy, embs)
-    idmap_arr = np.asarray(mapping, dtype=np.int64)
-    np.save(idmap_npy, idmap_arr)
-    return np.load(emb_npy, mmap_mode="r"), idmap_arr
-
-
-def try_import_faiss():
-    try:
-        import faiss  # type: ignore
-
-        return faiss
-    except Exception:
-        return None
-
-
-def build_faiss_index(
-    faiss, embs: np.ndarray, index_path: Path, normalized: bool
-) -> None:
-    dim = embs.shape[1]
-    if not normalized:
-        n = np.linalg.norm(embs, axis=1, keepdims=True) + 1e-12
-        embs = embs / n
-    index = faiss.IndexFlatIP(dim)
-    index.add(embs.astype(np.float32, copy=False))
-    faiss.write_index(index, str(index_path))
-
-
-def ensure_faiss_index(
-    faiss, embs: np.ndarray, index_path: Path, normalized: bool, rebuild: bool
-):
-    if rebuild or not index_path.exists():
-        build_faiss_index(faiss, embs, index_path, normalized)
-    return faiss.read_index(str(index_path))
 
 
 def format_and_print_results(
@@ -220,7 +173,9 @@ def format_and_print_results(
         print(" · ".join(row))
 
 
-def dedupe_hits_by_repo(hits: List[Tuple[float, int]], id_map_np: np.ndarray, top_k: int) -> List[Tuple[float, int]]:
+def dedupe_hits_by_repo(
+    hits: List[Tuple[float, int]], id_map_np: np.ndarray, top_k: int
+) -> List[Tuple[float, int]]:
     # Keep best score per repo_id
     best: Dict[int, Tuple[float, int]] = {}
     for score, j in hits:
@@ -242,58 +197,18 @@ def run(args: Args) -> None:
     model_name = args.model_name or str(meta.get("model", "BAAI/bge-small-en-v1.5"))
 
     device = detect_device(args.device)
-
-    # If FAISS index exists and user didn't opt out, prefer FAISS
-    if not args.use_faiss and args.faiss_index.exists():
-        args.use_faiss = True
-
     model = ensure_model(model_name, device)
 
-    # Load or build fast-load corpus cache (chunk-level)
-    corpus_np, id_map_np = ensure_npy_cache(args.emb_jsonl, EMB_NPY, IDMAP_NPY)
+    # Load corpus directly from JSONL
+    corpus_np, id_map_list = load_corpus_from_jsonl(args.emb_jsonl)
+    id_map_np = np.asarray(id_map_list, dtype=np.int64)
 
     # Determine how many to retrieve pre-dedupe
     total_n = corpus_np.shape[0]
     pre_k = args.top_k * (args.oversample if args.unique else 1)
     pre_k = min(pre_k, total_n)
 
-    if args.use_faiss:
-        faiss = try_import_faiss()
-        if faiss is None:
-            print("FAISS not installed. Falling back to Torch path.", file=sys.stderr)
-        else:
-            index = ensure_faiss_index(
-                faiss=faiss,
-                embs=corpus_np,
-                index_path=args.faiss_index,
-                normalized=args.normalize,
-                rebuild=args.build_faiss,
-            )
-            q = model.encode(
-                [args.query],
-                convert_to_numpy=True,
-                show_progress_bar=False,
-                normalize_embeddings=args.normalize,
-            )
-            if not args.normalize:
-                q = q / (np.linalg.norm(q, axis=1, keepdims=True) + 1e-12)
-            sims, idxs = index.search(q.astype(np.float32), pre_k)
-            hits = [
-                (float(sims[0][i]), int(idxs[0][i]))
-                for i in range(len(idxs[0]))
-                if idxs[0][i] >= 0
-            ]
-            if args.unique:
-                hits = dedupe_hits_by_repo(hits, id_map_np, args.top_k)
-            format_and_print_results(
-                hits=hits,
-                id_map_np=id_map_np,
-                starred_json=args.starred_json,
-                snippet_chars=args.snippet_chars,
-            )
-            return
-
-    # Torch fast path: move to device and do matmul + topk
+    # Torch path: move to device and do matmul + topk
     target_device = torch.device(device)
     corpus = torch.from_numpy(corpus_np).to(target_device)
     if args.normalize:
@@ -324,7 +239,7 @@ def run(args: Args) -> None:
 
 def parse_args() -> Args:
     p = argparse.ArgumentParser(
-        description="Semantic search over chunk embeddings from CLI"
+        description="Semantic search over chunk or representative embeddings from CLI"
     )
     p.add_argument("query", type=str, help="Search query text")
     p.add_argument("--top-k", type=int, default=20, help="Number of results to return")
@@ -333,7 +248,7 @@ def parse_args() -> Args:
         dest="emb_jsonl",
         type=Path,
         default=EMB_JSONL,
-        help="Path to chunk_embeddings.jsonl",
+        help="Path to embeddings JSONL (chunks or repo reps)",
     )
     p.add_argument(
         "--meta",
@@ -375,19 +290,6 @@ def parse_args() -> Args:
         help="Max characters to show from repo description",
     )
     p.add_argument(
-        "--use-faiss",
-        action="store_true",
-        help="Use FAISS ANN index if available (fast)",
-    )
-    p.add_argument(
-        "--build-faiss",
-        action="store_true",
-        help="Force rebuild FAISS index before search",
-    )
-    p.add_argument(
-        "--faiss-index", type=Path, default=FAISS_INDEX, help="Path to FAISS index file"
-    )
-    p.add_argument(
         "--no-unique",
         dest="unique",
         action="store_false",
@@ -411,9 +313,6 @@ def parse_args() -> Args:
         model_name=a.model_name,
         normalize=a.normalize,
         snippet_chars=a.snippet_chars,
-        use_faiss=a.use_faiss,
-        build_faiss=a.build_faiss,
-        faiss_index=a.faiss_index,
         unique=a.unique,
         oversample=a.oversample,
     )

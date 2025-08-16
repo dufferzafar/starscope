@@ -104,15 +104,26 @@ def detect_device(preferred: Optional[str] = None) -> str:
 
 
 def get_embedding_dim(conn: duckdb.DuckDBPyConnection) -> int:
+    # Prefer fixed-size array table for VSS
     try:
-        dim = conn.execute("SELECT array_length(embedding) FROM chunk_vectors_arr LIMIT 1").fetchone()
+        dim = conn.execute("SELECT array_length(embedding) FROM repo_reps_arr LIMIT 1").fetchone()
         if dim and isinstance(dim[0], int) and dim[0] > 0:
             return dim[0]
     except Exception:
         pass
-    # Fallback to list_length on original table
-    dim = conn.execute("SELECT list_length(embedding) FROM chunk_vectors LIMIT 1").fetchone()
-    return int(dim[0]) if dim and dim[0] else 0
+    # Fallback to list length from base table
+    try:
+        dim = conn.execute("SELECT list_length(embedding) FROM repo_reps LIMIT 1").fetchone()
+        if dim and isinstance(dim[0], int) and dim[0] > 0:
+            return dim[0]
+    except Exception:
+        pass
+    # Final fallback to metadata file
+    try:
+        meta = load_meta(EMB_META_JSON)
+        return int(meta.get("dim", 0))
+    except Exception:
+        return 0
 
 
 def build_array_literal(vec: np.ndarray, dim: int) -> str:
@@ -122,12 +133,12 @@ def build_array_literal(vec: np.ndarray, dim: int) -> str:
 
 
 def dedupe_hits_by_repo(rows: List[Tuple[int, int, float]], top_k: int) -> List[Tuple[int, int, float]]:
-    # rows: (repo_id, chunk_id, distance). Keep smallest distance per repo
+    # rows: (repo_id, rep_id, distance). Keep smallest distance per repo
     best: Dict[int, Tuple[int, int, float]] = {}
-    for rid, cid, dist in rows:
+    for rid, rep_id, dist in rows:
         curr = best.get(rid)
         if curr is None or dist < curr[2]:
-            best[rid] = (rid, cid, dist)
+            best[rid] = (rid, rep_id, dist)
     deduped = sorted(best.values(), key=lambda r: r[2])
     return deduped[:top_k]
 
@@ -143,7 +154,7 @@ def format_and_print(rows: List[Tuple[int, int, float]], conn: duckdb.DuckDBPyCo
     ).fetchall()
     meta_idx = {int(rid): (full_name, description, language, stars) for (rid, full_name, description, language, stars) in meta}
 
-    for rid, _cid, dist in rows:
+    for rid, _rep_id, dist in rows:
         full_name, description, language, stars = meta_idx.get(int(rid), (f"repo:{rid}", "", None, None))
         url = f"https://github.com/{full_name}"
         desc = (description or "").strip()
@@ -180,18 +191,29 @@ def run(args: Args) -> None:
         print(f"Query vector dim {q.shape[0]} != DB dim {dim}", file=sys.stderr)
         return
 
-    total_n = conn.execute("SELECT COUNT(*) FROM chunk_vectors_arr").fetchone()[0]
+    # Determine available rows from repo reps
+    try:
+        total_n = int(conn.execute("SELECT COUNT(*) FROM repo_reps_arr").fetchone()[0])
+        source_table = "repo_reps_arr"
+        select_cols = "repo_id, rep_id, embedding"
+        embed_expr = "embedding"  # already FLOAT[dim]
+    except Exception:
+        total_n = int(conn.execute("SELECT COUNT(*) FROM repo_reps").fetchone()[0])
+        source_table = "repo_reps"
+        select_cols = "repo_id, rep_id, embedding"
+        embed_expr = "embedding"  # LIST(FLOAT), distance works but slower
+
     pre_k = min(args.top_k * (args.oversample if args.unique else 1), int(total_n))
 
     # Build SQL using cosine distance; optimizer will use HNSW if present
     q_lit = build_array_literal(q.astype(np.float32, copy=False), dim)
     sql = f"""
-    SELECT repo_id, chunk_id, array_cosine_distance(embedding, {q_lit}) AS dist
-    FROM chunk_vectors_arr
+    SELECT repo_id, rep_id, array_cosine_distance({embed_expr}, {q_lit}) AS dist
+    FROM {source_table}
     ORDER BY dist ASC
     LIMIT {pre_k}
     """
-    rows = conn.execute(sql).fetchall()  # (repo_id, chunk_id, dist)
+    rows = conn.execute(sql).fetchall()  # (repo_id, rep_id, dist)
 
     if args.unique:
         rows = dedupe_hits_by_repo(rows, args.top_k)
@@ -201,7 +223,7 @@ def run(args: Args) -> None:
 
 
 def parse_args() -> Args:
-    p = argparse.ArgumentParser(description="Semantic search in DuckDB (VSS) over chunk embeddings")
+    p = argparse.ArgumentParser(description="Semantic search in DuckDB (VSS) over repo representatives")
     p.add_argument("query", type=str, help="Search query text")
     p.add_argument("--db", dest="db_path", type=Path, default=DEFAULT_DB, help="Path to starscope.duckdb")
     p.add_argument("--top-k", type=int, default=20, help="Number of results to return")

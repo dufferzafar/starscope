@@ -16,6 +16,7 @@ from tqdm import tqdm
 CACHE_DIR = Path(__file__).resolve().parent / ".cache"
 READMES_JSONL = CACHE_DIR / "readmes.jsonl"
 STARRED_JSON = CACHE_DIR / "starred.json"
+REPOS_JSONL = CACHE_DIR / "repos.jsonl"
 OUT_READMES_CLEAN = CACHE_DIR / "readmes_clean.jsonl"
 OUT_CHUNKS = CACHE_DIR / "chunks.jsonl"
 
@@ -24,6 +25,7 @@ OUT_CHUNKS = CACHE_DIR / "chunks.jsonl"
 class Args:
     readmes_jsonl: Path
     starred_json: Path
+    repos_jsonl: Path
     out_clean: Path
     out_chunks: Path
     chunk_size: int
@@ -35,11 +37,14 @@ class Args:
 
 # === SSL disable helpers (temporary, to avoid local cert issues) =============
 
+
 def _patch_requests_ssl_disable():
     try:
         import requests  # type: ignore
+
         try:
             import urllib3  # type: ignore
+
             urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
         except Exception:
             pass
@@ -78,8 +83,12 @@ _HTML_COMMENT = re.compile(r"<!--.*?-->", flags=re.DOTALL)
 _IMG_MD = re.compile(r"!\[[^\]]*\]\([^)]*\)")
 _IMG_MD_WRAPPED = re.compile(r"\[\s*!\[[^\]]*\]\([^)]*\)\s*\]\([^)]*\)")
 _IMG_HTML = re.compile(r"<img\b[^>]*>", flags=re.IGNORECASE)
-_TABLE_BADGE_HINT = re.compile(r"\|.+(shields\.io|badgen\.net|badge\.fury\.io).+\|", re.IGNORECASE)
-_BADGE_HOST_HINT = re.compile(r"(shields\.io|badgen\.net|badge\.fury\.io)", re.IGNORECASE)
+_TABLE_BADGE_HINT = re.compile(
+    r"\|.+(shields\.io|badgen\.net|badge\.fury\.io).+\|", re.IGNORECASE
+)
+_BADGE_HOST_HINT = re.compile(
+    r"(shields\.io|badgen\.net|badge\.fury\.io)", re.IGNORECASE
+)
 _WHITESPACE_LINES = re.compile(r"\n{3,}")
 
 
@@ -130,6 +139,7 @@ def clean_readme(raw_markdown: str) -> str:
 
 
 # === Chunkers ================================================================
+
 
 class BaseChunker:
     def __init__(self, chunk_size: int, overlap: int) -> None:
@@ -236,7 +246,9 @@ class CharChunker(BaseChunker):
                 break
 
 
-def build_chunker(spec: str, default_model: str, chunk_size: int, overlap: int, encoding_name: str) -> BaseChunker:
+def build_chunker(
+    spec: str, default_model: str, chunk_size: int, overlap: int, encoding_name: str
+) -> BaseChunker:
     # spec examples: "hf:BAAI/bge-small-en-v1.5", "tiktoken", "words", "chars"
     if spec.startswith("hf:"):
         model = spec.split(":", 1)[1] or default_model
@@ -253,14 +265,37 @@ def build_chunker(spec: str, default_model: str, chunk_size: int, overlap: int, 
 
 # === IO helpers ==============================================================
 
+
 def load_starred_map(path: Path) -> Dict[str, int]:
     data = json.loads(path.read_text(encoding="utf-8"))
-    return {item["full_name"]: int(item["id"]) for item in data if "full_name" in item and "id" in item}
+    return {
+        item["full_name"]: int(item["id"])
+        for item in data
+        if "full_name" in item and "id" in item
+    }
 
 
 def load_starred_index(path: Path) -> Dict[str, Dict]:
     data = json.loads(path.read_text(encoding="utf-8"))
     return {item.get("full_name"): item for item in data if item.get("full_name")}
+
+
+def load_repos_index_jsonl(path: Path) -> Dict[str, Dict]:
+    idx: Dict[str, Dict] = {}
+    if not path.exists():
+        return idx
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+                fn = rec.get("full_name")
+                if isinstance(fn, str):
+                    idx[fn] = rec
+            except Exception:
+                continue
+    return idx
 
 
 def iter_readmes(path: Path) -> Iterable[Tuple[str, str]]:
@@ -275,11 +310,29 @@ def iter_readmes(path: Path) -> Iterable[Tuple[str, str]]:
                 yield full_name, text
 
 
+def count_readmes(path: Path) -> int:
+    total = 0
+    with path.open("r", encoding="utf-8") as f:
+        for line in f:
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            full_name = rec.get("full_name")
+            text = rec.get("text", "")
+            if full_name and isinstance(text, str):
+                total += 1
+    return total
+
+
 def sha256_hex(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 # === Main ===================================================================
+
 
 def run(args: Args) -> None:
     args.out_clean.parent.mkdir(parents=True, exist_ok=True)
@@ -287,6 +340,7 @@ def run(args: Args) -> None:
 
     name_to_id = load_starred_map(args.starred_json)
     starred_index = load_starred_index(args.starred_json)
+    repos_index = load_repos_index_jsonl(args.repos_jsonl)
 
     chunker = build_chunker(
         spec=args.chunker,
@@ -299,35 +353,52 @@ def run(args: Args) -> None:
     cleaned_written = 0
     chunks_written = 0
 
-    with args.out_clean.open("w", encoding="utf-8") as f_clean, args.out_chunks.open(
-        "w", encoding="utf-8"
-    ) as f_chunks:
-        for full_name, raw_md in tqdm(iter_readmes(args.readmes_jsonl), desc="Preprocessing READMEs"):
+    total_readmes = count_readmes(args.readmes_jsonl)
+
+    with (
+        args.out_clean.open("w", encoding="utf-8") as f_clean,
+        args.out_chunks.open("w", encoding="utf-8") as f_chunks,
+    ):
+        for full_name, raw_md in tqdm(
+            iter_readmes(args.readmes_jsonl),
+            desc="Preprocessing READMEs",
+            total=total_readmes,
+        ):
             repo_id = name_to_id.get(full_name)
             if repo_id is None:
                 continue
 
             # Optional metadata chunk
             if args.add_meta_chunk:
-                meta = starred_index.get(full_name) or {}
+                meta = repos_index.get(full_name) or starred_index.get(full_name) or {}
                 language = meta.get("language") or ""
                 description = meta.get("description") or ""
-                if description or language:
-                    meta_text = normalize_whitespace(
-                        f"Title: {full_name}\nLanguage: {language}\nDescription: {description}"
+                topics = meta.get("topics") or []
+                if not isinstance(topics, list):
+                    topics = []
+                lines: List[str] = [f"Title: {full_name}"]
+                if language:
+                    lines.append(f"Language: {language}")
+                if description:
+                    lines.append(f"Description: {description}")
+                if topics:
+                    lines.append(
+                        "Topics: "
+                        + ", ".join(str(t) for t in topics if isinstance(t, str))
                     )
-                    f_chunks.write(
-                        json.dumps(
-                            {
-                                "repo_id": repo_id,
-                                "chunk_id": -1,
-                                "text": meta_text,
-                            },
-                            ensure_ascii=False,
-                        )
-                        + "\n"
+                meta_text = normalize_whitespace("\n".join(lines))
+                f_chunks.write(
+                    json.dumps(
+                        {
+                            "repo_id": repo_id,
+                            "chunk_id": -1,
+                            "text": meta_text,
+                        },
+                        ensure_ascii=False,
                     )
-                    chunks_written += 1
+                    + "\n"
+                )
+                chunks_written += 1
 
             cleaned = clean_readme(raw_md)
             clean_rec = {
@@ -360,13 +431,45 @@ def run(args: Args) -> None:
 
 
 def parse_args() -> Args:
-    p = argparse.ArgumentParser(description="Clean README markdown and chunk (HF/tiktoken/words/chars)")
-    p.add_argument("--readmes-jsonl", type=Path, default=READMES_JSONL, help="Path to readmes.jsonl input")
-    p.add_argument("--starred-json", type=Path, default=STARRED_JSON, help="Path to starred.json for repo_id map")
-    p.add_argument("--out-clean", type=Path, default=OUT_READMES_CLEAN, help="Output JSONL for cleaned readmes")
-    p.add_argument("--out-chunks", type=Path, default=OUT_CHUNKS, help="Output JSONL for chunks")
-    p.add_argument("--chunk-size", type=int, default=512, help="Target tokens/units per chunk (default: 512)")
-    p.add_argument("--overlap", type=int, default=50, help="Overlap between chunks (default: 50)")
+    p = argparse.ArgumentParser(
+        description="Clean README markdown and chunk (HF/tiktoken/words/chars)"
+    )
+    p.add_argument(
+        "--readmes-jsonl",
+        type=Path,
+        default=READMES_JSONL,
+        help="Path to readmes.jsonl input",
+    )
+    p.add_argument(
+        "--starred-json",
+        type=Path,
+        default=STARRED_JSON,
+        help="Path to starred.json for repo_id map",
+    )
+    p.add_argument(
+        "--repos-jsonl",
+        type=Path,
+        default=REPOS_JSONL,
+        help="Path to repos.jsonl for topics",
+    )
+    p.add_argument(
+        "--out-clean",
+        type=Path,
+        default=OUT_READMES_CLEAN,
+        help="Output JSONL for cleaned readmes",
+    )
+    p.add_argument(
+        "--out-chunks", type=Path, default=OUT_CHUNKS, help="Output JSONL for chunks"
+    )
+    p.add_argument(
+        "--chunk-size",
+        type=int,
+        default=512,
+        help="Target tokens/units per chunk (default: 512)",
+    )
+    p.add_argument(
+        "--overlap", type=int, default=50, help="Overlap between chunks (default: 50)"
+    )
     p.add_argument(
         "--chunker",
         type=str,
@@ -390,6 +493,7 @@ def parse_args() -> Args:
     return Args(
         readmes_jsonl=a.readmes_jsonl,
         starred_json=a.starred_json,
+        repos_jsonl=a.repos_jsonl,
         out_clean=a.out_clean,
         out_chunks=a.out_chunks,
         chunk_size=a.chunk_size,
@@ -401,4 +505,4 @@ def parse_args() -> Args:
 
 
 if __name__ == "__main__":
-    run(parse_args()) 
+    run(parse_args())
