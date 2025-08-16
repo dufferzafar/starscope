@@ -22,3 +22,9 @@ search_db term:
 db:
     rm -f scripts/.cache/starscope.duckdb
     uv run --active scripts/build_db.py
+
+build-ui:
+    cd ui && pnpm build
+
+gh-pages: build-ui
+    cd ../starscope-pages && git pull && cp -r ../starscope/ui/dist/* . && git add . && git commit -m "Deploy UI $(date -u +"%Y-%m-%dT%H:%M:%SZ")" && git push
