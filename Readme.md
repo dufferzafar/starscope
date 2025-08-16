@@ -2,6 +2,8 @@
 
 Semantic search over my starred github repositories.
 
+![StarScope UI](ui.png)
+
 ## Phase 1 - Semantic Search
 
 * Allows searching for stars not just via metadata
